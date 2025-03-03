@@ -727,7 +727,6 @@ def update_config_for_npu(config):
         config = { }
     config["NPU_USE_NPUW"] = "YES"
     config["NPUW_LLM"] = "YES"
-    config["NPUW_DEVICES"] = "CPU"
     return config
 
 
