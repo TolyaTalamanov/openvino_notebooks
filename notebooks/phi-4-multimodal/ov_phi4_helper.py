@@ -441,7 +441,7 @@ def convert_phi4mm(input_dir, output_dir, quantization_config=None):
         image_path = Path("cat.png")
 
         if not image_path.exists():
-            url = "https://github.com/openvinotoolkit/openvino_notebooks/assets/29454499/d5fbbd1a-d484-415c-88cb-9986625b7b11"
+            url = "http://images.cocodataset.org/val2017/000000039769.jpg"
             image = Image.open(requests.get(url, stream=True).raw)
             image.save(image_path)
         else:
@@ -722,6 +722,14 @@ def adaptive_enc_mask(x_len, chunk_start_idx, left_window=0, right_window=0):
 
 core = ov.Core()
 
+def update_config_for_npu(config):
+    if not config:
+        config = { }
+    config["NPU_USE_NPUW"] = "YES"
+    config["NPUW_LLM"] = "YES"
+    config["NPUW_DEVICES"] = "CPU"
+    return config
+
 
 class OVModelForCausalLMWithEmb(GenerationMixin):
     def __init__(self, model_dir, device="CPU", config=None, ov_config=None, compile=True) -> None:
@@ -735,7 +743,19 @@ class OVModelForCausalLMWithEmb(GenerationMixin):
         self.token_emb = core.read_model(model_dir / TEXT_EMBEDDINGS_PATH)
         self.request = None
         self.token_emb_request = None
+        self._lm_device = device.upper()
         self._device = device.upper()
+        print(f'LM device: {self._lm_device}')
+        # FIXME ...
+        if self._lm_device == "NPU":
+            # FIXME: Need to reshape emb_size.
+            # When optimum-intel conversion is complete this step won't be needed
+            inputs_embeds_shape = self.model.inputs[0].get_partial_shape()
+            print(inputs_embeds_shape)
+            inputs_embeds_shape[2] = 3072
+            self.model.reshape({"inputs_embeds": inputs_embeds_shape})
+            print(self.model.inputs)
+            self._device = "CPU"
         self.device = torch.device("cpu")
         self.ov_config = ov_config
         self.next_beam_idx = None
@@ -747,7 +767,11 @@ class OVModelForCausalLMWithEmb(GenerationMixin):
 
     def compile(self):
         if self.request is None:
-            self.request = core.compile_model(self.model, self._device, self.ov_config).create_infer_request()
+            if self._lm_device == "NPU":
+                print("[LOG_DEBUG] Compile LM model on NPU")
+                lm_config = update_config_for_npu(self.ov_config)
+            print(self.ov_config)
+            self.request = core.compile_model(self.model, self._lm_device, lm_config).create_infer_request()
         self._compile_token_emb()
 
     def _compile_token_emb(self):
@@ -925,12 +949,15 @@ class OVModelForCausalLMWithEmb(GenerationMixin):
 
 class OVPhiMMModelForCausalLM(GenerationMixin):
     def __init__(self, model_dir, device="CPU", ov_config=None) -> types.NoneType:
+        lm_device = device
+        if lm_device == "NPU":
+            device = "CPU"
         self._supports_cache_class = False
         self.config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
         self.config.is_decoder = True
         self.config.is_encoder_decoder = False
         self.generation_config = GenerationConfig.from_model_config(self.config)
-        self.model = OVModelForCausalLMWithEmb(model_dir, device, ov_config)
+        self.model = OVModelForCausalLMWithEmb(model_dir, lm_device, ov_config)
         self.vision_embedings = core.compile_model(model_dir / VISION_EMBEDDINGS_PATH, device, ov_config)
         self.vision_projector = core.compile_model(model_dir / VISION_PROJECTOR_PATH, device, ov_config)
         self.audio_embeddings = core.compile_model(model_dir / AUDIO_EMBEDDINGS_PATH, device, ov_config)
